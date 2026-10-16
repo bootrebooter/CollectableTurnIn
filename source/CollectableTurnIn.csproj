@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>0.1.0</Version>
+    <AssemblyName>CollectableTurnIn</AssemblyName>
+    <DalamudLibPath Condition="'$(DalamudLibPath)' == ''">$(APPDATA)\XIVLauncher\addon\Hooks\dev</DalamudLibPath>
+    <AssemblySearchPaths>$(AssemblySearchPaths);$(DalamudLibPath)</AssemblySearchPaths>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Dalamud" Private="false" />
+    <Reference Include="Dalamud.Bindings.ImGui" Private="false" />
+    <Reference Include="FFXIVClientStructs" Private="false" />
+    <Reference Include="InteropGenerator.Runtime" Private="false" />
+    <Reference Include="Lumina" Private="false" />
+    <Reference Include="Lumina.Excel" Private="false" />
+    <None Update="CollectableTurnIn.json" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
+</Project>
