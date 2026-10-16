@@ -1,0 +1,12 @@
+{
+  "Author": "Local custom build (based on AtmoOmen / Daily Routines)",
+  "Name": "収集品一括納品 / Collectable Turn In",
+  "InternalName": "CollectableTurnIn",
+  "AssemblyVersion": "0.1.0.0",
+  "Description": "収集品の連続納品・停止・近くのスクリップ取引窓口への切り替え。API 15向けローカル試作版。ゲーム内動作は未検証です。/cti で操作画面を表示。",
+  "Punchline": "収集品の一括納品とスクリップ交換NPCへの切り替え",
+  "ApplicableVersion": "any",
+  "DalamudApiLevel": 15,
+  "Tags": ["collectables", "scrip", "収集品"],
+  "IsHide": false
+}
