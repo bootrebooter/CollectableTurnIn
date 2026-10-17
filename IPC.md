@@ -27,7 +27,7 @@
 
 - 開始成功: `Accepted`
 - 停止成功: `Stopped`（停止した操作のID）
-- 拒否: `Unavailable`, `WrongThread`, `Busy`, `NotLoggedIn`, `ShopNotOpen`, `DialogOpen`, `NpcNotFound`, `UnsupportedGameVersion`, `NoItems`, `NotReady`, `NotRunning`, `Error`
+- 拒否: `Unavailable`, `WrongThread`, `Busy`, `NotLoggedIn`, `ShopNotOpen`, `DialogOpen`, `NpcNotFound`, `NpcOutOfRange`, `UnsupportedGameVersion`, `NoItems`, `NotReady`, `NotRunning`, `Error`
 
 停止は今後の送信を止めます。すでに送信済みの納品1件を取り消すことはできません。
 
@@ -112,3 +112,7 @@ public sealed class TurnInClient : IDisposable
 ```
 
 呼び出し側はIPC提供元が未インストール・無効・更新中の場合の例外を処理し、自動連打しないでください。戻り値をJsonDocumentなどで読み、acceptedとoperationIdを確認してください。ゲーム内での他プラグインからの呼び出しは未検証です。
+
+## 0.2.1での変更
+
+IPCバージョンは1を維持しています。NPCが見つかるものの6mより遠い場合、開始要求を`NpcOutOfRange`で拒否します。未知の拒否コードもaccepted=falseとして処理してください。NPC検索時の一時的な選択不可状態では拒否せず、会話終了後に再確認します。実際に選択できなければ`NpcNotFound`で終了します。最小送信間隔は応答待ちに上乗せせず、前回送信から計測します。
