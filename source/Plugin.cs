@@ -30,7 +30,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool SuppressInsufficientItemMessage = true;
 }
 
-public sealed unsafe class Plugin : IDalamudPlugin
+public sealed unsafe partial class Plugin : IDalamudPlugin
 {
     [PluginService] internal static IDalamudPluginInterface PI { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
@@ -97,6 +97,8 @@ public sealed unsafe class Plugin : IDalamudPlugin
         PI.UiBuilder.OpenMainUi += Open;
         PI.UiBuilder.OpenConfigUi += Open;
         Framework.Update += Update;
+        try { RegisterIpc(); }
+        catch { Dispose(); throw; }
     }
 
     private void Open() => pinned = true;
@@ -143,14 +145,14 @@ public sealed unsafe class Plugin : IDalamudPlugin
             ImGui.TextWrapped("現在の納品一覧を連続処理します。実行中は対象やカテゴリを変更しないでください。");
             if (bindingError != null) ImGui.TextWrapped(bindingError);
             ImGui.BeginDisabled(Busy || handIn == null || !CanHandIn(shop) || HasDialog());
-            if (ImGui.Button("一括納品")) startRequested = true;
+            if (ImGui.Button("一括納品")) _ = Framework.RunOnFrameworkThread(() => RequestOperation(false));
             ImGui.EndDisabled();
             ImGui.SameLine();
             ImGui.BeginDisabled(!Busy && !startRequested && !switchRequested);
             if (ImGui.Button("停止")) StopAll("手動で停止しました");
             ImGui.EndDisabled();
             ImGui.BeginDisabled(Busy || HasDialog() || !Visible(shop));
-            if (ImGui.Button("スクリップ交換NPCへ")) switchRequested = true;
+            if (ImGui.Button("スクリップ交換NPCへ")) _ = Framework.RunOnFrameworkThread(() => RequestOperation(true));
             ImGui.EndDisabled();
             ImGui.TextWrapped(status);
             ImGui.Text($"確認済み納品数: {batch.Completed}");
@@ -174,14 +176,14 @@ public sealed unsafe class Plugin : IDalamudPlugin
         {
             if (!Client.IsLoggedIn || Objects.LocalPlayer == null)
             {
-                if (Busy || startRequested || switchRequested) StopAll("ログアウトのため停止しました");
+                if (operations.Active || Busy || startRequested || switchRequested) StopAll("ログアウトのため停止しました", "LoggedOut");
                 return;
             }
-            if (Busy && Client.TerritoryType != territory) { StopAll("エリアが変わったため停止しました"); return; }
+            if (operations.Active && Client.TerritoryType != territory) { StopAll("エリアが変わったため停止しました", "TerritoryChanged"); return; }
             if (insufficientItems)
             {
                 insufficientItems = false;
-                if (batch.Running) { StopAll("納品可能なアイテムが不足しているため停止しました"); return; }
+                if (batch.Running) { StopAll("納品可能なアイテムが不足しているため停止しました", "InsufficientItems"); return; }
             }
             var now = Environment.TickCount64;
             var shop = Addon("CollectablesShop");
@@ -195,30 +197,38 @@ public sealed unsafe class Plugin : IDalamudPlugin
                     batchAddonId = shop->Id;
                     batch.Start(Count(shop), now);
                     status = batch.Status;
+                    if (!batch.Running) FinishOperation("NoItems");
                 }
+                else StopAll("開始前に納品画面の状態が変わりました", "PreconditionsChanged");
             }
             if (switchRequested)
             {
                 switchRequested = false;
                 if (!Busy && Visible(shop) && !HasDialog()) BeginSwitch(shop, now);
+                else StopAll("切り替え前に納品画面の状態が変わりました", "PreconditionsChanged");
             }
             if (batch.Running)
             {
                 if (!Visible(shop) || (nint)shop != batchAddon || shop->Id != batchAddonId)
-                { StopAll("納品画面が閉じられたため停止しました"); return; }
+                { StopAll("納品画面が閉じられたため停止しました", "ShopClosed"); return; }
                 if (batch.Tick(Count(shop), CanHandIn(shop), HasDialog(), now, config.IntervalMs))
                 {
                     var module = AgentModule.Instance();
                     var agent = module == null ? null : module->GetAgentByInternalId(AgentId.CollectablesShop);
-                    if (agent == null) { StopAll("納品処理を取得できませんでした"); return; }
+                    if (agent == null) { StopAll("納品処理を取得できませんでした", "Error"); return; }
                     handIn!(agent);
                 }
                 status = batch.Status;
-                if (!batch.Running) Notify($"{status}（確認済み {batch.Completed} 件）");
+                if (!batch.Running)
+                {
+                    FinishOperation(batch.Reason);
+                    Notify($"{status}（確認済み {batch.Completed} 件）");
+                }
             }
             if (phase != SwitchPhase.None) UpdateSwitch(now);
         }
-        catch (Exception ex) { Log.Error(ex, "Collectable Turn In failed"); StopAll("エラーのため停止しました。/xllog を確認してください。"); }
+        catch (Exception ex) { Log.Error(ex, "Collectable Turn In failed"); StopAll("エラーのため停止しました。/xllog を確認してください。", "Error"); }
+        finally { PublishSnapshot(); SendCompletionEvents(); }
     }
 
     private IGameObject? FindScripNpc()
@@ -253,7 +263,7 @@ public sealed unsafe class Plugin : IDalamudPlugin
     private void BeginSwitch(AtkUnitBase* shop, long now)
     {
         var npc = FindScripNpc();
-        if (npc == null) { status = "6m以内にスクリップ取引窓口が見つかりません。窓口に近づいてください。"; return; }
+        if (npc == null) { StopAll("6m以内にスクリップ取引窓口が見つかりません。窓口に近づいてください。", "NpcNotFound"); return; }
         territory = Client.TerritoryType;
         npcId = npc.GameObjectId;
         phase = SwitchPhase.Closing;
@@ -263,34 +273,35 @@ public sealed unsafe class Plugin : IDalamudPlugin
     }
     private void UpdateSwitch(long now)
     {
-        if (HasDialog()) { StopAll("確認画面が表示されたため切り替えを停止しました"); return; }
-        if (now >= switchDeadline) { StopAll("NPCへの切り替えが10秒以内に完了しませんでした"); return; }
+        if (HasDialog()) { StopAll("確認画面が表示されたため切り替えを停止しました", "DialogOpen"); return; }
+        if (now >= switchDeadline) { StopAll("NPCへの切り替えが10秒以内に完了しませんでした", "TimedOut"); return; }
         if (phase == SwitchPhase.Opening)
         {
             if (Visible(Addon("InclusionShop")) || Visible(Addon("SelectIconString")) || Visible(Addon("SelectString")) || Visible(Addon("ShopExchangeCurrency")))
-            { phase = SwitchPhase.None; status = "スクリップ交換NPCの画面が開きました。交換先を選んでください。"; }
+            { phase = SwitchPhase.None; status = "スクリップ交換NPCの画面が開きました。交換先を選んでください。"; FinishOperation("Completed"); }
             return;
         }
         if (Visible(Addon("CollectablesShop")) || Conditions[ConditionFlag.OccupiedInEvent]) return;
         var npc = Objects.FirstOrDefault(o => o.GameObjectId == npcId);
         var player = Objects.LocalPlayer;
         if (npc == null || player == null || !npc.IsTargetable || Vector3.Distance(player.Position, npc.Position) > 6f)
-        { StopAll("交換NPCが操作可能な範囲にいないため停止しました"); return; }
+        { StopAll("交換NPCが操作可能な範囲にいないため停止しました", "NpcNotFound"); return; }
         var targetSystem = TargetSystem.Instance();
-        if (targetSystem == null) { StopAll("NPC操作を初期化できませんでした"); return; }
+        if (targetSystem == null) { StopAll("NPC操作を初期化できませんでした", "Error"); return; }
         // Use the global client's normal interaction path (including line-of-sight checks).
         // Upstream sends EventStart packets; we do not need its CN-specific opcode resolver.
         targetSystem->InteractWithObject((NativeGameObject*)npc.Address, true);
         phase = SwitchPhase.Opening;
         switchDeadline = now + 10_000;
     }
-    private void StopAll(string reason)
+    private void StopAll(string reason, string code = "Cancelled")
     {
         startRequested = switchRequested = false;
         insufficientItems = false;
         phase = SwitchPhase.None;
         batch.Stop(reason);
         status = reason;
+        FinishOperation(code);
         Notify($"{reason}（確認済み {batch.Completed} 件）");
     }
     private void Notify(string message)
@@ -305,6 +316,10 @@ public sealed unsafe class Plugin : IDalamudPlugin
         batch.Stop("無効化");
         startRequested = switchRequested = false;
         phase = SwitchPhase.None;
+        status = "プラグインを無効化しました";
+        FinishOperation("Unloaded");
+        SendCompletionEvents();
+        UnregisterIpc();
         logHook?.Dispose();
         logHook = null;
         Framework.Update -= Update;
