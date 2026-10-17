@@ -58,7 +58,10 @@ public sealed unsafe partial class Plugin
             if (HasDialog()) return OperationTracker.Reply(false, "DialogOpen");
             if (switchNpc)
             {
-                if (FindScripNpc() == null) return OperationTracker.Reply(false, "NpcNotFound");
+                var npc = FindScripNpc();
+                if (npc == null) return OperationTracker.Reply(false, "NpcNotFound");
+                if (System.Numerics.Vector3.Distance(Objects.LocalPlayer.Position, npc.Position) > 6f)
+                    return OperationTracker.Reply(false, "NpcOutOfRange");
             }
             else
             {
@@ -92,6 +95,30 @@ public sealed unsafe partial class Plugin
         var id = operations.Id;
         StopAll("IPCから停止しました", "Cancelled");
         return OperationTracker.Reply(true, "Stopped", id);
+    }
+
+    private void RequestFromUi(bool switchNpc)
+    {
+        using var reply = JsonDocument.Parse(RequestOperation(switchNpc));
+        if (reply.RootElement.GetProperty("accepted").GetBoolean()) return;
+        var code = reply.RootElement.GetProperty("code").GetString();
+        status = code switch
+        {
+            "NpcNotFound" => "周囲にスクリップ取引窓口が見つかりません。窓口の近くでお試しください。",
+            "NpcOutOfRange" => "スクリップ取引窓口が6mより遠いため切り替えできません。窓口に近づいてください。",
+            "ShopNotOpen" => "収集品納品画面を開いてください。",
+            "NotLoggedIn" => "ログイン後にお試しください。",
+            "DialogOpen" => "確認画面を閉じてからお試しください。",
+            "Busy" => "別の処理を実行中です。終了するか停止してください。",
+            "NoItems" => "納品対象がありません。",
+            "NotReady" => "通常の納品ボタンが有効になるように対象を選んでください。",
+            "UnsupportedGameVersion" => bindingError ?? "このゲーム版の納品処理に対応していません。",
+            _ => $"操作を開始できませんでした（{code}）。",
+        };
+        pinned = true;
+        PublishSnapshot();
+        Log.Warning($"UI request rejected: {code}");
+        Notify(status);
     }
 
     private void PublishSnapshot()
