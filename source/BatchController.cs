@@ -46,7 +46,6 @@ public sealed class BatchController
             Completed++;
             previousCount = count;
             awaiting = false;
-            nextRequest = now + interval;
             deadline = now + 10_000;
         }
         else if (!awaiting && count != previousCount)
@@ -55,6 +54,8 @@ public sealed class BatchController
         if (now >= deadline) { Stop("10秒間進まなかったため停止しました", "TimedOut"); return false; }
         if (awaiting || !ready || now < nextRequest) return false;
         awaiting = true;
+        // The minimum interval runs from sending, overlapping the acknowledgement wait.
+        nextRequest = now + Math.Max(0, interval);
         deadline = now + 10_000;
         return true;
     }
