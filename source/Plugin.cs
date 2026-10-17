@@ -25,7 +25,8 @@ namespace CollectableTurnIn;
 public sealed class Configuration : IPluginConfiguration
 {
     public int Version { get; set; } = 1;
-    public int IntervalMs = 600;
+    public int IntervalMs = 100;
+    public int TimingRevision = 0;
     public bool Notify = true;
     public bool SuppressInsufficientItemMessage = true;
 }
@@ -38,6 +39,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     [PluginService] internal static ICommandManager Commands { get; private set; } = null!;
     [PluginService] internal static ISigScanner Scanner { get; private set; } = null!;
     [PluginService] internal static IObjectTable Objects { get; private set; } = null!;
+    [PluginService] internal static ITargetManager Targets { get; private set; } = null!;
     [PluginService] internal static IDataManager Data { get; private set; } = null!;
     [PluginService] internal static ICondition Conditions { get; private set; } = null!;
     [PluginService] internal static IClientState Client { get; private set; } = null!;
@@ -66,14 +68,20 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private uint territory;
     private SwitchPhase phase;
     private ulong npcId;
-    private long switchDeadline;
+    private readonly SwitchController npcSwitch = new();
     private enum SwitchPhase { None, Closing, Opening }
     private bool Busy => batch.Running || phase != SwitchPhase.None;
 
     public Plugin()
     {
         config = PI.GetPluginConfig() as Configuration ?? new Configuration();
-        config.IntervalMs = Math.Clamp(config.IntervalMs, 300, 2000);
+        if (config.TimingRevision < 1)
+        {
+            if (config.IntervalMs is 300 or 600) config.IntervalMs = 100;
+            config.TimingRevision = 1;
+            PI.SavePluginConfig(config);
+        }
+        config.IntervalMs = Math.Clamp(config.IntervalMs, 0, 2000);
         try
         {
             if (Scanner.TryScanText(HandInSignature, out var address))
@@ -145,20 +153,21 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             ImGui.TextWrapped("現在の納品一覧を連続処理します。実行中は対象やカテゴリを変更しないでください。");
             if (bindingError != null) ImGui.TextWrapped(bindingError);
             ImGui.BeginDisabled(Busy || handIn == null || !CanHandIn(shop) || HasDialog());
-            if (ImGui.Button("一括納品")) _ = Framework.RunOnFrameworkThread(() => RequestOperation(false));
+            if (ImGui.Button("一括納品")) _ = Framework.RunOnFrameworkThread(() => RequestFromUi(false));
             ImGui.EndDisabled();
             ImGui.SameLine();
             ImGui.BeginDisabled(!Busy && !startRequested && !switchRequested);
             if (ImGui.Button("停止")) StopAll("手動で停止しました");
             ImGui.EndDisabled();
             ImGui.BeginDisabled(Busy || HasDialog() || !Visible(shop));
-            if (ImGui.Button("スクリップ交換NPCへ")) _ = Framework.RunOnFrameworkThread(() => RequestOperation(true));
+            if (ImGui.Button("スクリップ交換NPCへ")) _ = Framework.RunOnFrameworkThread(() => RequestFromUi(true));
             ImGui.EndDisabled();
             ImGui.TextWrapped(status);
             ImGui.Text($"確認済み納品数: {batch.Completed}");
             if (ImGui.CollapsingHeader("設定"))
             {
-                if (ImGui.SliderInt("納品間隔 (ms)", ref config.IntervalMs, 300, 2000)) PI.SavePluginConfig(config);
+                if (ImGui.SliderInt("最小送信間隔 (ms)", ref config.IntervalMs, 0, 2000)) PI.SavePluginConfig(config);
+                ImGui.TextWrapped("0msでも前の1件の応答を待ちます。初期値は100msです。");
                 if (ImGui.Checkbox("終了時にチャット・画面通知", ref config.Notify)) PI.SavePluginConfig(config);
                 if (ImGui.Checkbox("連続納品中の素材不足メッセージをまとめる", ref config.SuppressInsufficientItemMessage)) PI.SavePluginConfig(config);
                 if (logHook == null) ImGui.TextWrapped("素材不足メッセージの整理は、この環境では利用できません。");
@@ -238,9 +247,10 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         // Same localized NPC-name anchor as upstream; no hard-coded Japanese label.
         var expectedName = Data.GetExcelSheet<ENpcResident>().GetRow(1001617).Singular.ToString();
         if (string.IsNullOrWhiteSpace(expectedName)) return null;
-        return Objects.Where(o => o.ObjectKind == ObjectKind.EventNpc && o.IsTargetable
-                && string.Equals(o.Name.TextValue, expectedName, StringComparison.OrdinalIgnoreCase)
-                && Vector3.Distance(player.Position, o.Position) <= 6f)
+        return Objects.Where(o => o.ObjectKind == ObjectKind.EventNpc
+                && (string.Equals(o.Name.TextValue, expectedName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(Data.GetExcelSheet<ENpcResident>().GetRowOrDefault(o.BaseId)?.Singular.ToString(),
+                        expectedName, StringComparison.OrdinalIgnoreCase)))
             .OrderBy(o => Vector3.DistanceSquared(player.Position, o.Position)).FirstOrDefault();
     }
     private void FilterLog(RaptureLogModule* module)
@@ -263,42 +273,62 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private void BeginSwitch(AtkUnitBase* shop, long now)
     {
         var npc = FindScripNpc();
-        if (npc == null) { StopAll("6m以内にスクリップ取引窓口が見つかりません。窓口に近づいてください。", "NpcNotFound"); return; }
+        if (npc == null || Objects.LocalPlayer == null || Vector3.Distance(Objects.LocalPlayer.Position, npc.Position) > 6f)
+        { StopAll("近くに操作できるスクリップ取引窓口が見つかりません。窓口に近づいてください。", "NpcNotFound"); return; }
         territory = Client.TerritoryType;
         npcId = npc.GameObjectId;
         phase = SwitchPhase.Closing;
-        switchDeadline = now + 10_000;
+        npcSwitch.Start(now);
         status = "納品画面を閉じ、スクリップ交換NPCに切り替えています…";
         shop->Close(true);
     }
     private void UpdateSwitch(long now)
     {
         if (HasDialog()) { StopAll("確認画面が表示されたため切り替えを停止しました", "DialogOpen"); return; }
-        if (now >= switchDeadline) { StopAll("NPCへの切り替えが10秒以内に完了しませんでした", "TimedOut"); return; }
-        if (phase == SwitchPhase.Opening)
+        var shopVisible = Visible(Addon("CollectablesShop"));
+        var occupied = ConversationOccupied();
+        var targetMenuOpen = Targets.Target?.GameObjectId == npcId
+            && (Visible(Addon("InclusionShop")) || Visible(Addon("SelectIconString"))
+                || Visible(Addon("SelectString")) || Visible(Addon("ShopExchangeCurrency")));
+        var step = npcSwitch.Tick(now, shopVisible, occupied, targetMenuOpen);
+        if (step == SwitchController.Step.Completed)
         {
-            if (Visible(Addon("InclusionShop")) || Visible(Addon("SelectIconString")) || Visible(Addon("SelectString")) || Visible(Addon("ShopExchangeCurrency")))
-            { phase = SwitchPhase.None; status = "スクリップ交換NPCの画面が開きました。交換先を選んでください。"; FinishOperation("Completed"); }
+            phase = SwitchPhase.None;
+            status = "スクリップ交換NPCの画面が開きました。交換先を選んでください。";
+            FinishOperation("Completed");
             return;
         }
-        if (Visible(Addon("CollectablesShop")) || Conditions[ConditionFlag.OccupiedInEvent]) return;
+        if (step == SwitchController.Step.TimedOut)
+        {
+            Log.Warning($"Scrip switch timed out: attempts={npcSwitch.Attempts}, shop={shopVisible}, occupied={occupied}");
+            StopAll(shopVisible || (occupied && npcSwitch.Attempts == 0)
+                ? "納品NPCとの会話が終了しませんでした。会話を閉じてから再度お試しください。"
+                : "交換NPCの画面が開きませんでした。NPCに近づき、障害物がない位置でお試しください。", "TimedOut");
+            return;
+        }
+        if (step != SwitchController.Step.Interact) return;
         var npc = Objects.FirstOrDefault(o => o.GameObjectId == npcId);
         var player = Objects.LocalPlayer;
         if (npc == null || player == null || !npc.IsTargetable || Vector3.Distance(player.Position, npc.Position) > 6f)
         { StopAll("交換NPCが操作可能な範囲にいないため停止しました", "NpcNotFound"); return; }
         var targetSystem = TargetSystem.Instance();
         if (targetSystem == null) { StopAll("NPC操作を初期化できませんでした", "Error"); return; }
-        // Use the global client's normal interaction path (including line-of-sight checks).
-        // Upstream sends EventStart packets; we do not need its CN-specific opcode resolver.
+        Targets.Target = npc;
         targetSystem->InteractWithObject((NativeGameObject*)npc.Address, true);
         phase = SwitchPhase.Opening;
-        switchDeadline = now + 10_000;
+        status = $"スクリップ取引窓口の応答を待っています（{npcSwitch.Attempts}/3）";
     }
+    private bool ConversationOccupied() => Conditions[ConditionFlag.Occupied]
+        || Conditions[ConditionFlag.Occupied30] || Conditions[ConditionFlag.OccupiedInEvent]
+        || Conditions[ConditionFlag.OccupiedInQuestEvent] || Conditions[ConditionFlag.Occupied33]
+        || Conditions[ConditionFlag.OccupiedInCutSceneEvent] || Conditions[ConditionFlag.Occupied38]
+        || Conditions[ConditionFlag.Occupied39] || Conditions[ConditionFlag.OccupiedSummoningBell];
     private void StopAll(string reason, string code = "Cancelled")
     {
         startRequested = switchRequested = false;
         insufficientItems = false;
         phase = SwitchPhase.None;
+        npcSwitch.Stop();
         batch.Stop(reason);
         status = reason;
         FinishOperation(code);
@@ -313,6 +343,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     public void Dispose()
     {
         disposed = true;
+        npcSwitch.Stop();
         batch.Stop("無効化");
         startRequested = switchRequested = false;
         phase = SwitchPhase.None;
