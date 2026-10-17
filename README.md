@@ -1,11 +1,21 @@
-# 収集品一括納品 — Collectable Turn In 0.1.0
+# 収集品一括納品 — Collectable Turn In 0.2.0
 
 日本・グローバル版の通常のXIVLauncher / Dalamud API 15用の単独プラグインです。
 Daily Routines本体、OmenTools、KamiToolKitのインストールは不要です。
 
 **ビルドとオフライン検証を終えた試作版です。ゲーム内での納品・NPC切り替えは未検証です。**
 
+## IPC連携
+
+0.2.0で開始・停止・状態取得・スクリップNPC切り替え・完了通知のIPC v1を追加しました。連携方法は [IPC.md](IPC.md) を参照してください。
+
 ## 導入
+
+通常のプラグイン一覧から導入する場合、Dalamud設定のカスタムプラグインリポジトリに次のURLを追加してください。
+
+https://raw.githubusercontent.com/bootrebooter/CollectableTurnIn/main/pluginmaster.json
+
+以下はローカルDLLを使用する場合の手順です。
 
 1. このフォルダを保存します。ZIPから使用する場合は、まず全体を展開します。
 2. Dalamud設定 → Experimental（実験的機能）→ Dev Plugin Locationsを開きます。
@@ -50,7 +60,7 @@ OmenToolsのTaskHelper、EventFrameworkExtension、EventStartPackt、LogMessageM
 ## 検証範囲と限界
 
 - インストール済みのDalamud 15.0.3.7の参照DLLに対してReleaseビルド成功（警告0、エラー0）。
-- 連続処理の状態管理テスト15項目に合格。応答前の重複送信防止、待機間隔、終了、タイムアウト、手動停止、確認画面、一覧変化、再開始を確認。
+- 連続処理の状態管理・IPC通知管理テスト27項目に合格。応答前の重複送信防止、待機間隔、終了、タイムアウト、手動停止、確認画面、一覧変化、再開始を確認。
 - インストール済みの `ffxiv_dx11.exe` をファイルとして検査し、元コードの納品関数の検索パターンが1か所だけ一致することを確認。
 - ローカルの日本語ゲームデータでNPC行1001617が「スクリップ取引窓口」、ログ1941が素材不足メッセージであることを確認。
 - これらは実際のゲーム内動作を保証するものではありません。ゲーム内でのDLL読み込み、ボタン表示、連続納品、交換NPCへの切り替えは未検証です。ゲームのファイルやDalamud設定は変更していません。
