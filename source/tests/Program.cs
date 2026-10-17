@@ -16,9 +16,9 @@ BatchController Started(int count = 2)
 var b = Started();
 Check(b.Tick(2, true, false, 0, 600), "First request may be sent");
 Check(!b.Tick(2, true, false, 800, 600) && b.Completed == 0, "No duplicate before server acknowledgement");
-Check(!b.Tick(1, true, false, 900, 600) && b.Completed == 1, "Acknowledgement counts exactly one and starts cooldown");
-Check(!b.Tick(1, true, false, 1499, 600), "Cooldown enforced");
-Check(b.Tick(1, true, false, 1500, 600), "Next request after cooldown");
+Check(b.Tick(1, true, false, 900, 600) && b.Completed == 1, "Long acknowledgement overlaps minimum interval; no extra cooldown");
+Check(!b.Tick(1, true, false, 1499, 600), "No duplicate while second request is pending");
+Check(!b.Tick(1, true, false, 1500, 600), "Elapsed interval never bypasses acknowledgement");
 Check(!b.Tick(0, false, false, 1600, 600) && !b.Running && b.Completed == 2, "Final acknowledgement completes the batch");
 b = Started(); b.Tick(2, true, false, 0, 600);
 Check(!b.Tick(2, true, true, 1, 600) && !b.Running, "Confirmation dialog halts without further request");
@@ -76,4 +76,35 @@ using (var reply = System.Text.Json.JsonDocument.Parse(OperationTracker.Reply(fa
         && reply.RootElement.GetProperty("operationId").ValueKind == System.Text.Json.JsonValueKind.Null,
         "Rejected reply has no operation identity");
 }
+
+b = Started(); b.Tick(2, true, false, 0, 100);
+Check(!b.Tick(1, true, false, 50, 100), "Fast acknowledgement still respects send interval");
+Check(!b.Tick(1, true, false, 99, 100) && b.Tick(1, true, false, 100, 100), "Next send at minimum interval from previous send");
+b = Started(); b.Tick(2, true, false, 0, 0);
+Check(!b.Tick(2, true, false, 1, 0), "Zero interval never duplicates unacknowledged request");
+Check(b.Tick(1, true, false, 2, 0), "Zero interval proceeds immediately after acknowledgement");
+b = Started(); b.Tick(2, true, false, 0, 100);
+Check(!b.Tick(1, false, false, 500, 100) && b.Tick(1, true, false, 501, 100), "Disabled game button still blocks fast mode");
+var sw = new SwitchController(); sw.Start(0);
+Check(sw.Tick(0, true, false, false) == SwitchController.Step.Wait, "Old shop blocks NPC interaction");
+Check(sw.Tick(100, false, true, false) == SwitchController.Step.Wait, "Conversation busy blocks NPC interaction");
+Check(sw.Tick(200, false, false, false) == SwitchController.Step.Wait, "Closing frame does not immediately interact");
+Check(sw.Tick(449, false, false, false) == SwitchController.Step.Wait
+    && sw.Tick(450, false, false, false) == SwitchController.Step.Interact, "250ms stable idle permits first interaction");
+Check(sw.Tick(1450, false, true, false) == SwitchController.Step.Wait && sw.Attempts == 1, "No retry while new conversation is active");
+Check(sw.Tick(1500, false, true, true) == SwitchController.Step.Completed && !sw.Running, "Opened target menu completes while occupied");
+Check(sw.Tick(2000, false, false, false) == SwitchController.Step.Wait, "Completed switch never interacts again");
+sw.Start(0); sw.Tick(0, false, false, false); sw.Tick(250, false, false, false);
+Check(sw.Tick(1249, false, false, false) == SwitchController.Step.Wait
+    && sw.Tick(1250, false, false, false) == SwitchController.Step.Interact, "Failed interaction retry is rate limited");
+Check(sw.Tick(2250, false, false, false) == SwitchController.Step.Interact
+    && sw.Tick(3250, false, false, false) == SwitchController.Step.Wait && sw.Attempts == 3, "At most three interaction attempts");
+Check(sw.Tick(10000, false, false, false) == SwitchController.Step.TimedOut && !sw.Running, "No response ends with bounded timeout");
+sw.Start(0);
+Check(sw.Tick(0, false, true, true) == SwitchController.Step.Wait, "Existing menu before first attempt is not success");
+sw.Stop();
+Check(sw.Tick(300, false, false, false) == SwitchController.Step.Wait, "Manual stop prevents NPC interaction");
+sw.Start(0); sw.Tick(0, false, false, false); sw.Tick(200, false, true, false); sw.Tick(250, false, false, false);
+Check(sw.Tick(499, false, false, false) == SwitchController.Step.Wait
+    && sw.Tick(500, false, false, false) == SwitchController.Step.Interact, "Reappearing occupied condition resets settle time");
 Console.WriteLine($"{passed} checks passed.");
