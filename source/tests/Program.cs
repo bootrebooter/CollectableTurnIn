@@ -38,4 +38,42 @@ b = Started(0);
 Check(!b.Running && !b.Tick(0, true, false, 0, 600), "Empty list never starts");
 b.Start(1, 100);
 Check(b.Completed == 0 && b.Tick(1, true, false, 100, 600), "Restart resets state");
+
+
+b = Started(1); b.Tick(1, true, false, 0, 600); b.Tick(0, true, false, 1, 600);
+Check(b.Reason == "Completed", "Successful batch exposes terminal code");
+b.Reset();
+Check(b.Completed == 0 && !b.Running, "Accepted pending operation cannot inherit old count");
+var tracker = new OperationTracker();
+var first = tracker.Begin("TurnIn");
+var rejected = false;
+try { tracker.Begin("TurnIn"); } catch (InvalidOperationException) { rejected = true; }
+Check(rejected && tracker.Id == first, "Busy operation retains identity");
+tracker.Finish("Completed", "done", 2);
+tracker.Finish("Cancelled", "duplicate", 9);
+var events = tracker.TakeCompletions();
+Check(events.Length == 1 && !tracker.Active, "Terminal event emitted once and active state cleared");
+using (var json = System.Text.Json.JsonDocument.Parse(events[0]))
+{
+    var r = json.RootElement;
+    Check(r.GetProperty("operationId").GetString() == first && r.GetProperty("success").GetBoolean()
+        && r.GetProperty("completedCount").GetInt32() == 2, "Completion JSON preserves ID, success and count");
+}
+Check(tracker.TakeCompletions().Length == 0, "Drained events are never resent");
+var second = tracker.Begin("SwitchToScripNpc");
+Check(second != first, "Each accepted operation receives a new identity");
+tracker.Finish("TimedOut", "timeout", 99);
+Check(tracker.LastResult is { Success: false, CompletedCount: 0, Code: "TimedOut" }, "NPC failure never reports turn-in count");
+var drained = tracker.TakeCompletions();
+tracker.Begin("TurnIn"); tracker.Finish("Cancelled", "stop before start", b.Completed);
+Check(drained.Length == 1 && tracker.TakeCompletions().Length == 1, "Reentrant completion is deferred to next drain");
+Check(tracker.LastResult is { CompletedCount: 0, Success: false }, "Pending cancellation has zero completed items");
+tracker.Begin("TurnIn"); tracker.Finish("Unloaded", "unload", 1);
+Check(tracker.LastResult is { Code: "Unloaded", Success: false }, "Unload terminates accepted operation");
+using (var reply = System.Text.Json.JsonDocument.Parse(OperationTracker.Reply(false, "WrongThread")))
+{
+    Check(!reply.RootElement.GetProperty("accepted").GetBoolean()
+        && reply.RootElement.GetProperty("operationId").ValueKind == System.Text.Json.JsonValueKind.Null,
+        "Rejected reply has no operation identity");
+}
 Console.WriteLine($"{passed} checks passed.");
