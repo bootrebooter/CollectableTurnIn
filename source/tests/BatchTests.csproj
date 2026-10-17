@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Exe</OutputType><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
-  <ItemGroup><Compile Include="..\BatchController.cs" Link="BatchController.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="..\BatchController.cs" Link="BatchController.cs" /><Compile Include="..\OperationTracker.cs" Link="OperationTracker.cs" /></ItemGroup>
 </Project>
